@@ -1,0 +1,17 @@
+{
+    "name": "php-win-ext/expect",
+    "type": "php-ext",
+    "license": [
+        "PHP-3.01"
+    ],
+    "authors": [
+        {
+            "name": "Michael Spector",
+            "email": "michael@php.net"
+        }
+    ],
+    "require": {
+        "php": ">= 8.0.0"
+    },
+    "description": "This extension allows to interact with processes through PTY, using expect library."
+}
