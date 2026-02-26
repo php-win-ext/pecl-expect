@@ -26,6 +26,9 @@
 #if PHP_MAJOR_VERSION >= 7
 php_stream *php_expect_stream_open (php_stream_wrapper *wrapper, const char *command, const char *mode, int options, 
                            zend_string **opened_command, php_stream_context *context STREAMS_DC TSRMLS_DC)
+#elif PHP_MAJOR_VERSION == 5 && PHP_MINOR_VERSION >= 6
+php_stream *php_expect_stream_open (php_stream_wrapper *wrapper, const char *command, const char *mode, int options,
+							  char **opened_command, php_stream_context *context STREAMS_DC TSRMLS_DC)
 #else
 php_stream *php_expect_stream_open (php_stream_wrapper *wrapper, char *command, char *mode, int options, 
 							  char **opened_command, php_stream_context *context STREAMS_DC TSRMLS_DC)
@@ -36,12 +39,17 @@ php_stream *php_expect_stream_open (php_stream_wrapper *wrapper, char *command, 
 		command += sizeof("expect://")-1;
 	} 
 
-#if PHP_MAJOR_VERSION >= 7
+#if PHP_MAJOR_VERSION >= 7 || (PHP_MAJOR_VERSION == 5 && PHP_MINOR_VERSION >= 6)
     if ((fp = exp_popen((char*)command)) != NULL) {
 #else
 	if ((fp = exp_popen(command)) != NULL) {
 #endif
 		php_stream* stream = php_stream_fopen_from_pipe (fp, mode);
+		stream->flags |= PHP_STREAM_FLAG_NO_SEEK;
+		/* PTY reads may return EIO when the child exits; suppress notices (PHP 7.4+ d59aac58b3e7). */
+#ifdef PHP_STREAM_FLAG_SUPPRESS_ERRORS
+		stream->flags |= PHP_STREAM_FLAG_SUPPRESS_ERRORS;
+#endif
 #if PHP_MAJOR_VERSION >= 7
         zval z_pid;
         ZVAL_LONG (&z_pid, exp_pid);

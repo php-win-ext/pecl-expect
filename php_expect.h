@@ -47,6 +47,7 @@ extern zend_module_entry expect_module_entry;
 
 PHP_MINIT_FUNCTION(expect);
 PHP_MSHUTDOWN_FUNCTION(expect);
+PHP_RINIT_FUNCTION(expect);
 PHP_MINFO_FUNCTION(expect);
 
 PHP_FUNCTION(expect_popen);

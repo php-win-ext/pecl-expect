@@ -13,5 +13,9 @@
     "require": {
         "php": ">= 8.0.0"
     },
+    "php-ext": {
+        "extension-name": "expect",
+        "os-families-exclude": ["windows"]
+    },
     "description": "This extension allows to interact with processes through PTY, using expect library."
 }

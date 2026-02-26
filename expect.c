@@ -53,7 +53,7 @@ zend_module_entry expect_module_entry = {
 	expect_functions,
 	PHP_MINIT(expect),
 	PHP_MSHUTDOWN(expect),
-	NULL,
+	PHP_RINIT(expect),
 	NULL,
 	PHP_MINFO(expect),
 	PHP_EXPECT_VERSION,
@@ -151,8 +151,18 @@ static PHP_INI_MH(OnSetExpectLogUser)
  *  */
 static PHP_INI_MH(OnSetExpectLogFile)
 {
+	/* PHP streams cannot be opened during module startup because the resource
+	 * list (EG(regular_list)) is not yet initialized. The logfile will be
+	 * opened in RINIT once the request context is available. */
+	if (stage == PHP_INI_STAGE_STARTUP || stage == PHP_INI_STAGE_SHUTDOWN) {
+		return SUCCESS;
+	}
+
 	if (EXPECT_G(logfile_stream)) {
 		php_stream_close(EXPECT_G(logfile_stream));
+		EXPECT_G(logfile_stream) = NULL;
+		exp_logfile = NULL;
+		exp_logfile_all = 0;
 	}
 #if PHP_MAJOR_VERSION >= 7
    if (ZSTR_LEN(new_value) > 0) {
@@ -232,6 +242,28 @@ PHP_MSHUTDOWN_FUNCTION(expect)
 /* }}} */
 
 
+/* {{{ PHP_RINIT_FUNCTION
+ * Apply ini settings that require PHP streams, skipped during MINIT. */
+PHP_RINIT_FUNCTION(expect)
+{
+	if (!EXPECT_G(logfile_stream)) {
+		char *logfile = zend_ini_string("expect.logfile", sizeof("expect.logfile") - 1, 0);
+		if (logfile && strlen(logfile) > 0) {
+			php_stream *stream = php_stream_open_wrapper(logfile, "a", 0, NULL);
+			if (stream) {
+				stream->flags |= PHP_STREAM_FLAG_NO_SEEK;
+				if (php_stream_cast(stream, PHP_STREAM_AS_STDIO, (void **) &exp_logfile, REPORT_ERRORS) == SUCCESS) {
+					EXPECT_G(logfile_stream) = stream;
+					exp_logfile_all = 1;
+				}
+			}
+		}
+	}
+	return SUCCESS;
+}
+/* }}} */
+
+
 /* {{{ PHP_MINFO_FUNCTION */
 PHP_MINFO_FUNCTION(expect)
 {
@@ -287,6 +319,10 @@ PHP_FUNCTION(expect_popen)
 	}
 
 	stream->flags |= PHP_STREAM_FLAG_NO_SEEK;
+	/* PTY reads may return EIO when the child exits; suppress notices (PHP 7.4+ d59aac58b3e7). */
+#ifdef PHP_STREAM_FLAG_SUPPRESS_ERRORS
+	stream->flags |= PHP_STREAM_FLAG_SUPPRESS_ERRORS;
+#endif
 
 #if PHP_MAJOR_VERSION >= 7
     ZVAL_LONG (&z_pid, exp_pid);
@@ -309,13 +345,17 @@ PHP_FUNCTION(expect_expectl)
 	struct exp_case *ecases, *ecases_ptr, matchedcase;
 #if PHP_MAJOR_VERSION >= 7
     zval *z_stream, *z_cases, *z_match=NULL, *z_case, *z_value;
+	zend_ulong key;
 #else
 	zval *z_stream, *z_cases, *z_match=NULL, **z_case, **z_value;
+	ulong key;
 #endif
 	php_stream *stream;
 	int fd, argc;
-	ulong key;
-	
+#if PHP_MAJOR_VERSION >= 7
+	HashPosition pos;
+#endif
+
 	if (ZEND_NUM_ARGS() < 2 || ZEND_NUM_ARGS() > 3) { WRONG_PARAM_COUNT; }
 
 	if (zend_parse_parameters (ZEND_NUM_ARGS() TSRMLS_CC, "ra|z/", &z_stream, &z_cases, &z_match) == FAILURE) {
@@ -329,7 +369,7 @@ PHP_FUNCTION(expect_expectl)
 #endif
 
 #if PHP_MAJOR_VERSION >= 7
-    if (!&(stream->wrapperdata)) {
+	if (Z_TYPE(stream->wrapperdata) != IS_LONG) {
 #else
 	if (!stream->wrapperdata) {
 #endif
@@ -345,16 +385,17 @@ PHP_FUNCTION(expect_expectl)
 	ecases = (struct exp_case*) safe_emalloc (argc + 1, sizeof(struct exp_case), 0);
 	ecases_ptr = ecases;
 
-	zend_hash_internal_pointer_reset (Z_ARRVAL_P(z_cases));
-
 #if PHP_MAJOR_VERSION >= 7
-    while ((z_case = zend_hash_get_current_data (Z_ARRVAL_P(z_cases))) != NULL)
+	zend_hash_internal_pointer_reset_ex (Z_ARRVAL_P(z_cases), &pos);
+
+    while ((z_case = zend_hash_get_current_data_ex (Z_ARRVAL_P(z_cases), &pos)) != NULL)
     {
         zval *z_pattern, *z_exp_type;
-        zend_hash_get_current_key(Z_ARRVAL_P(z_cases), NULL, &key);
+        zend_hash_get_current_key_ex(Z_ARRVAL_P(z_cases), NULL, &key, &pos);
 
         if (Z_TYPE_P(z_case) != IS_ARRAY) {
 #else
+	zend_hash_internal_pointer_reset (Z_ARRVAL_P(z_cases));
 	while (zend_hash_get_current_data (Z_ARRVAL_P(z_cases), (void **)&z_case) == SUCCESS)
 	{
 		zval **z_pattern, **z_exp_type;
@@ -436,7 +477,11 @@ PHP_FUNCTION(expect_expectl)
 		}
 
 		ecases_ptr++;
+#if PHP_MAJOR_VERSION >= 7
+		zend_hash_move_forward_ex(Z_ARRVAL_P(z_cases), &pos);
+#else
 		zend_hash_move_forward(Z_ARRVAL_P(z_cases));
+#endif
 	}
 	ecases_ptr->pattern = NULL;
 	ecases_ptr->re = NULL;
@@ -452,11 +497,15 @@ PHP_FUNCTION(expect_expectl)
 		if (z_match && exp_match && exp_match_len > 0) {
 			char *tmp = (char *)emalloc (sizeof(char) * (exp_match_len + 1));
 			strlcpy (tmp, exp_match, exp_match_len + 1);
-#if PHP_MAJOR_VERSION >= 7
+#if PHP_MAJOR_VERSION > 7 || (PHP_MAJOR_VERSION == 7 && PHP_MINOR_VERSION >= 4)
             z_match = zend_try_array_init(z_match);
-			if (!z_match) {
-				return;
-			}
+            if (!z_match) {
+                return;
+            }
+            add_index_string(z_match, 0, tmp);
+#elif PHP_MAJOR_VERSION >= 7
+            zval_dtor(z_match);
+            array_init(z_match);
             add_index_string(z_match, 0, tmp);
 #else
 			zval_dtor (z_match);
